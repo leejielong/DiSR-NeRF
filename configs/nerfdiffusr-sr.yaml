@@ -1,0 +1,160 @@
+name: "nerfdiffusr"
+# tag: "${basename:${data.dataroot}}_${rmspace:${system.prompt_processor.prompt},_}"
+exp_root_dir: "outputs"
+seed: 0
+
+# data_type: "blender-camera-datamodule"
+# data:
+#   dataroot: "data/blender/lego"
+#   data_format: "blender" #['blender','nerfstudio']
+#   downsample: 2 # downsample training images
+#   zoom: 4 # upsample training images
+
+data_type: "llff-camera-datamodule"
+data:
+  dataroot: "data/nerf_llff_data/horns"
+  downsample: 8 # downsample training images
+  zoom: 4 # upsample training images
+  n_test_traj_steps: ${trainer.limit_test_batches}
+
+system_type: "nerfdiffusr-system"
+system:
+  dynamic_ray_sampling: true
+  batch_size: 1024 # number of rays for random sampling
+  max_batch_size: 100000 # max ray count in dynamic ray sampling
+  vis: false
+  vis_interval: 200
+  vis_save_interval: ${trainer.val_check_interval}
+  use_ray_correlator: false
+  supersample: false
+  patch_size: 128
+  use_lr_renders: false
+
+  # stage schedule
+  start_sr_step: 20000
+  num_sr_steps: 5000 # = 800 steps/img
+  num_sync_steps: 20000
+  sr_batch_size: 16
+
+  geometry_type: "ngp-volume"
+  geometry:
+    n_input_dims: 3
+    n_feature_dims: 16
+    radius: 1.5 # bbox=[-radius,radius]**3
+    normal_type: "analytic"
+    density_bias: -1.
+    density_activation: trunc_exp
+
+    pos_encoding_config:
+      otype: HashGrid # ProgressiveHashGrid
+      n_levels: 16
+      n_features_per_level: 2
+      log2_hashmap_size: 19
+      base_resolution: 16
+      per_level_scale: 1.447269237440378 # max resolution 4096
+    mlp_network_config:
+      otype: FullyFusedMLP
+      activation: ReLU
+      output_activation: none
+      n_neurons: 64
+      n_hidden_layers: 1
+
+  material_type: "latent-radiance-material" # actually uses mlp when paramters are defined
+  material:
+    input_feature_dims: ${system.geometry.n_feature_dims}
+    n_latent_dims: 4
+    n_image_dims: 3
+    dir_encoding_config:
+      otype: SphericalHarmonics
+      degree: 4
+    mlp_network_config:
+      otype: FullyFusedMLP
+      activation: ReLU
+      output_activation: sigmoid
+      n_neurons: 64
+      n_hidden_layers: 2
+
+  background_type: "solid-color-background"
+
+  renderer_type: "ngp-volume-renderer"
+  renderer:
+    radius: ${system.geometry.radius} 
+    learned_background: false
+    num_samples_per_ray: 1024  # prompt_processor_type: None
+    randomized: true
+    near_plane: 0.1
+    far_plane: 1e4
+    grid_prune: true
+    prune_alpha_threshold: true
+    occgrid_resolution: 128
+    occgrid_levels: 1
+    eval_chunk_size: 32768
+
+  prompt_processor_type: "stable-diffusion-prompt-processor"
+  prompt_processor:
+    pretrained_model_name_or_path: "stabilityai/stable-diffusion-x4-upscaler"
+    prompt: "horns, high resolution, 4K, photo"
+    spawn: false
+
+  guidance_type: "stable-diffusion-upscaler-rsd-guidance"
+  guidance:
+    guidance_scale: 10.0
+    half_precision_weights: true
+    pretrained_model_name_or_path: "stabilityai/stable-diffusion-x4-upscaler"
+    anneal_strategy: "linear"
+    min_step_percent: 0.5
+    max_step_percent: 0.98
+    anneal_end_step: ${system.num_sr_steps}
+    anneal_start_step: 0
+    step_ratio : 0.001
+    guidance_type: 'rsd'
+    t_min_shift_per_stage: 0.0 # min time shift per stage
+    t_max_shift_per_stage: 0.0 # min time shift per stage
+    cfg_shift_per_stage: 0.0
+  loggers:
+    wandb:
+      enable: false
+      project: "threestudio"
+      name: None  
+      
+  loss:
+    lambda_rsd: 1.
+    lambda_rgb: 1.
+
+  optimizer:
+    name: AdamW
+    args:
+      betas: [0.9, 0.99]
+      eps: 1.e-15
+      lr: 1e-2
+    params:
+      geometry:
+        lr: 1e-2
+      material:
+        lr: 1e-2
+      param:
+        lr: 1e-2
+
+  # scheduler:
+  #   name: MultiStepLR
+  #   interval: step
+  #   args:
+  #     # milestones: [62000,83000,104000]
+  #     milestones: [45000,70000,95000]
+  #     gamma: 0.33
+
+
+trainer:
+  max_steps: 100000
+  val_check_interval: 1000
+  log_every_n_steps: 5000
+  num_sanity_val_steps: 0
+  enable_progress_bar: true
+  precision: 16-mixed
+  limit_val_batches: 1
+  limit_test_batches: 100
+
+checkpoint:
+  save_last: true
+  save_top_k: -1
+  every_n_train_steps: ${trainer.log_every_n_steps}
